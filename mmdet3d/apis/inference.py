@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import re
+
 from copy import deepcopy
 from os import path as osp
 
@@ -18,7 +18,6 @@ from mmdet3d.datasets.pipelines import Compose
 from mmdet3d.models import build_model
 from mmdet3d.utils import get_root_logger
 
-
 def convert_SyncBN(config):
     """Convert config's naiveSyncBN to BN.
 
@@ -33,7 +32,6 @@ def convert_SyncBN(config):
                                     replace('naiveSyncBN', 'BN')
             else:
                 convert_SyncBN(config[item])
-
 
 def init_model(config, checkpoint=None, device='cuda:0'):
     """Initialize a model from config file, which could be a 3D detector or a
@@ -77,13 +75,85 @@ def init_model(config, checkpoint=None, device='cuda:0'):
     model.eval()
     return model
 
-
 def inference_detector(model, pcd):
     """Inference point cloud with the detector.
 
     Args:
         model (nn.Module): The loaded detector.
         pcd (str): Point cloud files.
+
+    Returns:
+        tuple: Predicted results and data from pipeline.
+    """
+    cfg = model.cfg
+    device = next(model.parameters()).device  # model device
+
+    if not isinstance(pcd, str):
+        cfg = cfg.copy()
+        # set loading pipeline type
+        cfg.data.test.pipeline[0].type = 'LoadPointsFromDict'
+
+    # build the data pipeline
+    test_pipeline = deepcopy(cfg.data.test.pipeline)
+    test_pipeline = Compose(test_pipeline)
+    box_type_3d, box_mode_3d = get_box_type(cfg.data.test.box_type_3d)
+
+    if isinstance(pcd, str):
+        # load from point clouds file
+        data = dict(
+            pts_filename=pcd,
+            box_type_3d=box_type_3d,
+            box_mode_3d=box_mode_3d,
+            # for ScanNet demo we need axis_align_matrix
+            ann_info=dict(axis_align_matrix=np.eye(4)),
+            sweeps=[],
+            # set timestamp = 0
+            timestamp=[0],
+            img_fields=[],
+            bbox3d_fields=[],
+            pts_mask_fields=[],
+            pts_seg_fields=[],
+            bbox_fields=[],
+            mask_fields=[],
+            seg_fields=[])
+    else:
+        # load from http
+        data = dict(
+            points=pcd,
+            box_type_3d=box_type_3d,
+            box_mode_3d=box_mode_3d,
+            # for ScanNet demo we need axis_align_matrix
+            ann_info=dict(axis_align_matrix=np.eye(4)),
+            sweeps=[],
+            # set timestamp = 0
+            timestamp=[0],
+            img_fields=[],
+            bbox3d_fields=[],
+            pts_mask_fields=[],
+            pts_seg_fields=[],
+            bbox_fields=[],
+            mask_fields=[],
+            seg_fields=[])
+    data = test_pipeline(data)
+    data = collate([data], samples_per_gpu=1)
+    if next(model.parameters()).is_cuda:
+        # scatter to specified GPU
+        data = scatter(data, [device.index])[0]
+    else:
+        # this is a workaround to avoid the bug of MMDataParallel
+        data['img_metas'] = data['img_metas'][0].data
+        data['points'] = data['points'][0].data
+    # forward the model
+    with torch.no_grad():
+        result = model(return_loss=False, rescale=True, **data)
+    return result, data
+
+def ros_inference_detector(model, pcd):
+    """Inference point cloud with the detector.
+
+    Args:
+        model (nn.Module): The loaded detector.
+        pcd (np.ndarray): Point cloud.
 
     Returns:
         tuple: Predicted results and data from pipeline.
