@@ -17,6 +17,7 @@ from mmdet3d.core.bbox import get_box_type
 from mmdet3d.datasets.pipelines import Compose
 from mmdet3d.models import build_model
 from mmdet3d.utils import get_root_logger
+from mmdet3d.core.points import BasePoints, get_points_type
 
 def convert_SyncBN(config):
     """Convert config's naiveSyncBN to BN.
@@ -168,6 +169,7 @@ def ros_inference_detector(model, pcd):
 
     # build the data pipeline
     test_pipeline = deepcopy(cfg.data.test.pipeline)
+    # test_pipeline.pop(0)
     test_pipeline = Compose(test_pipeline)
     box_type_3d, box_mode_3d = get_box_type(cfg.data.test.box_type_3d)
 
@@ -190,9 +192,8 @@ def ros_inference_detector(model, pcd):
             mask_fields=[],
             seg_fields=[])
     else:
-        # load from http
+        # load from pointcloud
         data = dict(
-            points=pcd,
             box_type_3d=box_type_3d,
             box_mode_3d=box_mode_3d,
             # for ScanNet demo we need axis_align_matrix
@@ -207,6 +208,12 @@ def ros_inference_detector(model, pcd):
             bbox_fields=[],
             mask_fields=[],
             seg_fields=[])
+
+        points_class = get_points_type('LIDAR')
+        points = points_class(
+            pcd, points_dim=pcd.shape[-1], attribute_dims=None)
+        data['points'] = points
+
     data = test_pipeline(data)
     data = collate([data], samples_per_gpu=1)
     if next(model.parameters()).is_cuda:

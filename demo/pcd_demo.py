@@ -6,7 +6,7 @@ from mmdet3d.apis import inference_detector, init_model, show_result_meshlab, ro
 
 import sys, re
 import numpy as np
-sys.path.append("/opt/ros/melodic/lib/python2.7/dist-packages")
+sys.path.append("~/opt/ros/melodic/lib/python2.7/dist-packages")
 
 import rospy
 from pyquaternion import Quaternion
@@ -14,7 +14,8 @@ from jsk_recognition_msgs.msg import BoundingBox, BoundingBoxArray
 from numpy.lib.recfunctions import structured_to_unstructured
 from sensor_msgs.msg import PointCloud2, PointField, Image
 
-sys.path.append("/home/catkin_ws/src:/opt/ros/melodic/share")
+sys.path.append("~/catkin_ws/src:/opt/ros/melodic/share")
+sys.path.append("~/Desktop/mmdetection3d")
 
 # mappings between PointField types and numpy types
 type_mappings = [(PointField.INT8, np.dtype('int8')), (PointField.UINT8, np.dtype('uint8')),
@@ -59,9 +60,12 @@ class SecondROS:
             default=True,
             action='store_true',
             help='whether to save online visualization results')
-        args = parser.parse_args()
+        self.args = parser.parse_args()
 
         rospy.init_node('second_ros')
+
+        # build the model from a config file and a checkpoint file
+        self.model = init_model(self.args.config, self.args.checkpoint, device=self.args.device)
 
         # Subscriber
         self.sub_lidar = rospy.Subscriber("/zoe/velodyne_points", PointCloud2, self.lidar_callback, queue_size=1)
@@ -69,14 +73,24 @@ class SecondROS:
         # Publisher
         self.pub_bbox = rospy.Publisher("/detections", BoundingBoxArray, queue_size=1)
 
-        # build the model from a config file and a checkpoint file
-        self.model = init_model(args.config, args.checkpoint, device=args.device)
+        # # test a single image 
+        # result, data = inference_detector(self.model, self.args.pcd)
+        # print("")
+        # # show the results
+        # show_result_meshlab(
+        #     data,
+        #     result,
+        #     self.args.out_dir,
+        #     self.args.score_thr,
+        #     show=self.args.show,
+        #     snapshot=self.args.snapshot,
+        #     task='det')
 
+        self.scenenum=1
         rospy.spin()
     
     def lidar_callback(self, msg):
 
-        # (trans, rot) = self.listener.lookupTransform('zoe/world', 'zoe/velodyne', rospy.Time(0))
         intensity_fname = None
         intensity_dtype = None
         for field in msg.fields:
@@ -89,27 +103,18 @@ class SecondROS:
         
         if intensity_fname:
             pc_arr = structured_to_unstructured(pc_arr[["x", "y", "z", intensity_fname]]).copy()
-            # pc_arr[:, [1, 0]] = pc_arr[:, [0, 1]] #change x,y to follow openpcdet convention
             pc_arr[:, 3] = pc_arr[:, 3] / 255
         else:
             pc_arr = structured_to_unstructured(pc_arr[["x", "y", "z"]]).copy()
             pc_arr = np.hstack((pc_arr, np.zeros((pc_arr.shape[0], 1))))
 
-        lidar_boxes = self.model.predict(pc_arr)
-
-        # TODO 
-        # # test a single image
-        # result, data = ros_inference_detector(self.model, args.pcd)
-
-        # # show the results
-        # show_result_meshlab(
-        #     data,
-        #     result,
-        #     args.out_dir,
-        #     args.score_thr,
-        #     show=args.show,
-        #     snapshot=args.snapshot,
-        #     task='det')
+        # Passing the zoe pointcloud 
+        result, data = ros_inference_detector(self.model, pc_arr)
+        lidar_boxes = []
+        lidar_boxes.append( {'pred_boxes':result[0]['boxes_3d'].tensor.numpy(),
+                        'pred_labels': result[0]['labels_3d'].numpy(),
+                        'pred_scores': result[0]['scores_3d'].numpy()
+        })
 
         if lidar_boxes is not None:
             num_detects = lidar_boxes[0]['pred_boxes'].shape[0]
@@ -120,32 +125,31 @@ class SecondROS:
 
                 bbox.header.frame_id = msg.header.frame_id
                 bbox.header.stamp = rospy.Time.now()
-
-                bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][0])
-                bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][1])
+                
+                bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][0])
+                bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][1])
                 bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2])
                 # bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2]) + float(
                 #     lidar_boxes[0]['pred_boxes'][i][5]) / 2
-                bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
-                bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
+                bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
+                bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
                 bbox.dimensions.z = float(lidar_boxes[0]['pred_boxes'][i][5])  # height
-                #############
 
-                q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6]))
+                q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6])+np.pi/2)
                 bbox.pose.orientation.x = q.x
                 bbox.pose.orientation.y = q.y
                 bbox.pose.orientation.z = q.z
                 bbox.pose.orientation.w = q.w
 
-                if int(lidar_boxes[0]['pred_labels'][i]) == 1:
+                if int(lidar_boxes[0]['pred_labels'][i]) == 0:
                     arr_bbox.boxes.append(bbox)
                     bbox.label = i
                     bbox.value = i
 
             arr_bbox.header.frame_id = msg.header.frame_id
             arr_bbox.header.stamp = rospy.Time.now()
-            print("Number of detections: {}".format(num_detects))
-
+            print(f"Scence num: {self.scenenum} Number of detections: {num_detects}")
+            self.scenenum += 1
             self.pub_bbox.publish(arr_bbox)
 
     def _fields_to_dtype(self, fields, point_step):
@@ -172,50 +176,6 @@ class SecondROS:
             offset += 1
 
         return np_dtype_list
-
-
-# def main():
-#     parser = ArgumentParser()
-#     parser.add_argument('--pcd', 
-#         default='demo/data/kitti/kitti_000008.bin',
-#         help='Point cloud file')       
-#     parser.add_argument('--config', 
-#         default='configs/second/hv_second_secfpn_6x8_80e_kitti-3d-car.py',
-#         help='Config file')
-#     parser.add_argument('--checkpoint', 
-#         default='checkpoints/hv_second_secfpn_6x8_80e_kitti-3d-car_20200620_230238-393f000c.pth',
-#         help='Checkpoint file')
-#     parser.add_argument(
-#         '--device', default='cuda:0', help='Device used for inference')
-#     parser.add_argument(
-#         '--score-thr', type=float, default=0.0, help='bbox score threshold')
-#     parser.add_argument(
-#         '--out-dir', type=str, default='demo', help='dir to save results')
-#     parser.add_argument(
-#         '--show',
-#         default=True,
-#         action='store_true',
-#         help='show online visualization results')
-#     parser.add_argument(
-#         '--snapshot',
-#         default=True,
-#         action='store_true',
-#         help='whether to save online visualization results')
-#     args = parser.parse_args()
-
-#     # build the model from a config file and a checkpoint file
-#     model = init_model(args.config, args.checkpoint, device=args.device)
-#     # test a single image
-#     result, data = ros_inference_detector(model, args.pcd)
-#     # show the results
-#     show_result_meshlab(
-#         data,
-#         result,
-#         args.out_dir,
-#         args.score_thr,
-#         show=args.show,
-#         snapshot=args.snapshot,
-#         task='det')
 
 
 if __name__ == '__main__':
