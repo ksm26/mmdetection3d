@@ -2,7 +2,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from argparse import ArgumentParser
 
-from mmdet3d.apis import inference_detector, init_model, show_result_meshlab, ros_inference_detector
+from mmdet3d.apis import inference_detector, init_model, ros_inference_detector
 
 import sys, re
 import numpy as np
@@ -39,15 +39,22 @@ class SecondROS:
             default='demo/data/kitti/kitti_000008.bin',
             help='Point cloud file')       
         parser.add_argument('--config', 
-            default='configs/second/hv_second_secfpn_6x8_80e_kitti-3d-car.py',
+            # default='configs/second/hv_second_secfpn_6x8_80e_kitti-3d-car.py',
+            # default='configs/pointpillars/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car.py',
+            # default='configs/point_rcnn/point_rcnn_2x8_kitti-3d-3classes.py',  # car boxes are not displayed
+            default='configs/3dssd/3dssd_4x4_kitti-3d-car.py',
             help='Config file')
         parser.add_argument('--checkpoint', 
-            default='checkpoints/hv_second_secfpn_6x8_80e_kitti-3d-car_20200620_230238-393f000c.pth',
+            # default='checkpoints/hv_second_secfpn_6x8_80e_kitti-3d-car_20200620_230238-393f000c.pth',
+            # default='checkpoints/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car_20220331_134606-d42d15ed.pth',
+            # default='checkpoints/point_rcnn_2x8_kitti-3d-3classes_20211208_151344.pth', # car boxes are not displayed
+            default='checkpoints/3dssd_4x4_kitti-3d-car_20210818_203828-b89c8fc4.pth',
             help='Checkpoint file')
         parser.add_argument(
             '--device', default='cuda:0', help='Device used for inference')
         parser.add_argument(
-            '--score-thr', type=float, default=0.0, help='bbox score threshold')
+            '--score-thr', type=float, default=0.15, help='bbox score threshold')
+            # 0.15 - 3dssd (as expected), 0.25 - pointpillar, 0.2 - pointrcnn
         parser.add_argument(
             '--out-dir', type=str, default='demo', help='dir to save results')
         parser.add_argument(
@@ -72,19 +79,6 @@ class SecondROS:
 
         # Publisher
         self.pub_bbox = rospy.Publisher("/detections", BoundingBoxArray, queue_size=1)
-
-        # # test a single image 
-        # result, data = inference_detector(self.model, self.args.pcd)
-        # print("")
-        # # show the results
-        # show_result_meshlab(
-        #     data,
-        #     result,
-        #     self.args.out_dir,
-        #     self.args.score_thr,
-        #     show=self.args.show,
-        #     snapshot=self.args.snapshot,
-        #     task='det')
 
         self.scenenum=1
         rospy.spin()
@@ -116,41 +110,54 @@ class SecondROS:
                         'pred_scores': result[0]['scores_3d'].numpy()
         })
 
+        self.plot_bbox_lidar(lidar_boxes,msg)
+
+    def plot_bbox_lidar(self,lidar_boxes,msg):
+
+        for batch_id in range(len(lidar_boxes)):
+            if self.args.score_thr is not None:
+                    mask = lidar_boxes[batch_id]['pred_scores'] > self.args.score_thr
+                    lidar_boxes[batch_id]['pred_boxes'] = lidar_boxes[batch_id]['pred_boxes'][mask]
+                    lidar_boxes[batch_id]['pred_scores'] = lidar_boxes[batch_id]['pred_scores'][mask]   
+
         if lidar_boxes is not None:
             num_detects = lidar_boxes[0]['pred_boxes'].shape[0]
             arr_bbox = BoundingBoxArray()
-            # TODO no need to do these as everything is already an array
+
             for i in range(num_detects):
                 bbox = BoundingBox()
 
                 bbox.header.frame_id = msg.header.frame_id
                 bbox.header.stamp = rospy.Time.now()
                 
-                bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][0])
-                bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][1])
+                bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][0])
+                bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][1])
                 bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2])
-                # bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2]) + float(
-                #     lidar_boxes[0]['pred_boxes'][i][5]) / 2
-                bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
-                bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
+
+                bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
+                bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
                 bbox.dimensions.z = float(lidar_boxes[0]['pred_boxes'][i][5])  # height
 
-                q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6])+np.pi/2)
+                q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6]))
                 bbox.pose.orientation.x = q.x
                 bbox.pose.orientation.y = q.y
                 bbox.pose.orientation.z = q.z
                 bbox.pose.orientation.w = q.w
 
-                if int(lidar_boxes[0]['pred_labels'][i]) == 0:
+                if int(lidar_boxes[0]['pred_labels'][i]) == 0: # change for Car label
                     arr_bbox.boxes.append(bbox)
                     bbox.label = i
                     bbox.value = i
-
+        
             arr_bbox.header.frame_id = msg.header.frame_id
             arr_bbox.header.stamp = rospy.Time.now()
             print(f"Scence num: {self.scenenum} Number of detections: {num_detects}")
+
             self.scenenum += 1
             self.pub_bbox.publish(arr_bbox)
+
+        else:
+            boxes = None
 
     def _fields_to_dtype(self, fields, point_step):
         '''Convert a list of PointFields to a numpy record datatype.
@@ -176,7 +183,6 @@ class SecondROS:
             offset += 1
 
         return np_dtype_list
-
 
 if __name__ == '__main__':
     second_ros = SecondROS()

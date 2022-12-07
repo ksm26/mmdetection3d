@@ -452,7 +452,7 @@ class SSD3DHead(VoteHead):
             list[tuple[torch.Tensor]]: Bounding boxes, scores and labels.
         """
         # decode boxes
-        sem_scores = F.sigmoid(bbox_preds['obj_scores']).transpose(1, 2)
+        sem_scores = torch.sigmoid(bbox_preds['obj_scores']).transpose(1, 2)
         obj_scores = sem_scores.max(-1)[0]
         bbox3d = self.bbox_coder.decode(bbox_preds)
 

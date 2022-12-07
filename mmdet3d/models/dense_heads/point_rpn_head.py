@@ -312,7 +312,7 @@ class PointRPNHead(BaseModule):
             origin=(0.5, 0.5, 0.5))
 
         if isinstance(bbox, LiDARInstance3DBoxes):
-            box_idx = bbox.points_in_boxes(points)
+            box_idx = bbox.points_in_boxes_part(points) # original - points_in_boxes
             box_indices = box_idx.new_zeros([num_bbox + 1])
             box_idx[box_idx == -1] = num_bbox
             box_indices.scatter_add_(0, box_idx.long(),

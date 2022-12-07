@@ -1,7 +1,7 @@
 # model settings
 _base_ = './hv_pointpillars_secfpn_6x8_160e_kitti-3d-3class.py'
 
-point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
+point_cloud_range = [-34.56, -39.68, -3, 34.56, 39.68, 1]
 model = dict(
     bbox_head=dict(
         type='Anchor3DHead',
