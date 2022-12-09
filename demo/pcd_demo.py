@@ -42,18 +42,20 @@ class SecondROS:
             # default='configs/second/hv_second_secfpn_6x8_80e_kitti-3d-car.py',
             # default='configs/pointpillars/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car.py',
             # default='configs/point_rcnn/point_rcnn_2x8_kitti-3d-3classes.py',  # car boxes are not displayed
-            default='configs/3dssd/3dssd_4x4_kitti-3d-car.py',
+            # default='configs/3dssd/3dssd_4x4_kitti-3d-car.py',
+            default='configs/regnet/hv_pointpillars_regnet-1.6gf_fpn_sbn-all_4x8_2x_nus-3d.py',
             help='Config file')
         parser.add_argument('--checkpoint', 
             # default='checkpoints/hv_second_secfpn_6x8_80e_kitti-3d-car_20200620_230238-393f000c.pth',
             # default='checkpoints/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car_20220331_134606-d42d15ed.pth',
             # default='checkpoints/point_rcnn_2x8_kitti-3d-3classes_20211208_151344.pth', # car boxes are not displayed
-            default='checkpoints/3dssd_4x4_kitti-3d-car_20210818_203828-b89c8fc4.pth',
+            # default='checkpoints/3dssd_4x4_kitti-3d-car_20210818_203828-b89c8fc4.pth',
+            default='checkpoints/nuscenes/hv_pointpillars_regnet-1.6gf_fpn_sbn-all_4x8_2x_nus-3d_20200629_050311-dcd4e090.pth',
             help='Checkpoint file')
         parser.add_argument(
             '--device', default='cuda:0', help='Device used for inference')
         parser.add_argument(
-            '--score-thr', type=float, default=0.15, help='bbox score threshold')
+            '--score-thr', type=float, default=0.5, help='bbox score threshold')
             # 0.15 - 3dssd (as expected), 0.25 - pointpillar, 0.2 - pointrcnn
         parser.add_argument(
             '--out-dir', type=str, default='demo', help='dir to save results')
@@ -102,10 +104,20 @@ class SecondROS:
             pc_arr = structured_to_unstructured(pc_arr[["x", "y", "z"]]).copy()
             pc_arr = np.hstack((pc_arr, np.zeros((pc_arr.shape[0], 1))))
 
+        if 'nuscenes' in self.args.checkpoint:
+            pc_arr = np.hstack((pc_arr, np.zeros((pc_arr.shape[0], 1))))
+
         # Passing the zoe pointcloud 
         result, data = ros_inference_detector(self.model, pc_arr)
         lidar_boxes = []
-        lidar_boxes.append( {'pred_boxes':result[0]['boxes_3d'].tensor.numpy(),
+
+        if 'nuscenes' in self.args.checkpoint:
+            lidar_boxes.append( {'pred_boxes':result[0]['pts_bbox']['boxes_3d'].tensor.numpy(),
+                            'pred_labels': result[0]['pts_bbox']['labels_3d'].numpy(),
+                            'pred_scores': result[0]['pts_bbox']['scores_3d'].numpy()
+            })
+        else:
+            lidar_boxes.append( {'pred_boxes':result[0]['boxes_3d'].tensor.numpy(),
                         'pred_labels': result[0]['labels_3d'].numpy(),
                         'pred_scores': result[0]['scores_3d'].numpy()
         })
@@ -137,8 +149,12 @@ class SecondROS:
                 bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
                 bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
                 bbox.dimensions.z = float(lidar_boxes[0]['pred_boxes'][i][5])  # height
+                
+                if 'nuscenes' in self.args.checkpoint:
+                    q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6])+np.pi/2)
+                else:
+                    q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6]))
 
-                q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6]))
                 bbox.pose.orientation.x = q.x
                 bbox.pose.orientation.y = q.y
                 bbox.pose.orientation.z = q.z
