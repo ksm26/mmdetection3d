@@ -6,16 +6,35 @@ from mmdet3d.apis import inference_detector, init_model, ros_inference_detector
 
 import sys, re
 import numpy as np
-sys.path.append("~/opt/ros/melodic/lib/python2.7/dist-packages")
+sys.path.append("/opt/ros/melodic/lib/python2.7/dist-packages")
 
 import rospy
 from pyquaternion import Quaternion
 from jsk_recognition_msgs.msg import BoundingBox, BoundingBoxArray
 from numpy.lib.recfunctions import structured_to_unstructured
-from sensor_msgs.msg import PointCloud2, PointField, Image
+from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
+import math
+import argparse
+import torch
 
-sys.path.append("~/catkin_ws/src:/opt/ros/melodic/share")
+sys.path.append("~/Desktop/ROS-tracker/catkin_ws/src:/opt/ros/melodic/share")
 sys.path.append("~/Desktop/mmdetection3d")
+
+sys.path.append("/home/khushdeep/Desktop/3D-Multi-Object-Tracker")
+from tracker.config import cfg, cfg_from_yaml_file
+from zoe_3DMOT import Track_seq,save_seq
+
+sys.path.append("/home/khushdeep/Desktop/3D-Detection-Tracking-Viewer")
+from zoe_3D_tracking_viewer import zoe_viewer
+
+sys.path.append("/home/khushdeep/Desktop/3D-Detection-Tracking-Viewer")
+from zoe_3D_tracking_viewer import zoe_viewer
+
+import tf
+from tf2_ros import Buffer,TransformListener
+from tf2_msgs.msg import TFMessage
+from message_filters import Subscriber,TimeSynchronizer,ApproximateTimeSynchronizer
+
 
 # mappings between PointField types and numpy types
 type_mappings = [(PointField.INT8, np.dtype('int8')), (PointField.UINT8, np.dtype('uint8')),
@@ -34,6 +53,32 @@ DUMMY_FIELD_PREFIX = '__'
 
 class SecondROS:
     def __init__(self):
+        rospy.init_node('second_ros')
+        self.scenenum=1
+        self.tf_listener = tf.TransformListener()
+        # Tracking
+        self.camera_info_msg = rospy.wait_for_message("/zoe/camera_front/camera_out/camera_info", CameraInfo)
+        self.cam_P = np.array(self.camera_info_msg.P).reshape((3, 4))
+        print(self.cam_P)
+        now = rospy.Time.now()
+        self.tf_listener.waitForTransform('zoe/camera_front', 'zoe/velodyne', rospy.Time(0), rospy.Duration(5.0))
+        (trans_camera, rot_camera) = self.tf_listener.lookupTransform('zoe/camera_front', 'zoe/velodyne',rospy.Time(0))
+        print(f'translation_camera = {trans_camera}')
+        self.velo2Cam = np.asarray(self.tf_listener.fromTranslationRotation(trans_camera, rot_camera))
+        print(f'velo2cam = {self.velo2Cam}')
+        print(f'Camera translation={trans_camera}')
+
+        parser = argparse.ArgumentParser(description='arg parser')
+        parser.add_argument('--cfg_file', type=str,
+                            default="/home/khushdeep/Desktop/3D-Multi-Object-Tracker/config/online"
+                                    "/zoe.yaml",
+                            help='specify the config for tracking')
+        args = parser.parse_args()
+        yaml_file = args.cfg_file
+
+        self.config = cfg_from_yaml_file(yaml_file, cfg)
+        self.Tracker = Track_seq(self.config)
+
         parser = ArgumentParser()
         parser.add_argument('--pcd', 
             default='demo/data/kitti/kitti_000008.bin',
@@ -55,7 +100,7 @@ class SecondROS:
         parser.add_argument(
             '--device', default='cuda:0', help='Device used for inference')
         parser.add_argument(
-            '--score-thr', type=float, default=0.5, help='bbox score threshold')
+            '--score-thr', type=float, default=0.3, help='bbox score threshold')
             # 0.15 - 3dssd (as expected), 0.25 - pointpillar, 0.2 - pointrcnn
         parser.add_argument(
             '--out-dir', type=str, default='demo', help='dir to save results')
@@ -70,22 +115,36 @@ class SecondROS:
             action='store_true',
             help='whether to save online visualization results')
         self.args = parser.parse_args()
-
-        rospy.init_node('second_ros')
-
         # build the model from a config file and a checkpoint file
         self.model = init_model(self.args.config, self.args.checkpoint, device=self.args.device)
 
         # Subscriber
         self.sub_lidar = rospy.Subscriber("/zoe/velodyne_points", PointCloud2, self.lidar_callback, queue_size=1)
+        self.sub_image = rospy.Subscriber("/zoe/camera_front/image_color", Image, self.image_callback)
 
         # Publisher
         self.pub_bbox = rospy.Publisher("/detections", BoundingBoxArray, queue_size=1)
 
-        self.scenenum=1
+
+
         rospy.spin()
     
+    def image_callback(self, image_data):
+        # br = CvBridge()
+        # img = br.imgmsg_to_cv2(image_data)
+        img = np.frombuffer(image_data.data, dtype=np.uint8).reshape(image_data.height, image_data.width, -1)
+        zoe_viewer(img, self.track_obj, self.velo2Cam, self.cam_P)
+    
     def lidar_callback(self, msg):
+
+        self.tf_listener.waitForTransform('zoe/world', 'zoe/velodyne', rospy.Time(), rospy.Duration(4.0))
+        (trans, rot) = self.tf_listener.lookupTransform('zoe/world', 'zoe/velodyne', rospy.Time(0))
+        (trans_inv, rot_inv) = self.tf_listener.lookupTransform('zoe/velodyne', 'zoe/world', rospy.Time(0))
+        # print(trans)
+        ego_pose= np.asarray(self.tf_listener.fromTranslationRotation(trans,rot))
+        world_2_ego = np.asarray(self.tf_listener.fromTranslationRotation(trans_inv,rot_inv))
+        self.scenenum += 1
+        # print(f'Matrix:{matrix}')
 
         intensity_fname = None
         intensity_dtype = None
@@ -122,7 +181,21 @@ class SecondROS:
                         'pred_scores': result[0]['scores_3d'].numpy()
         })
 
+        ####Test code
+        lidar_boxes[0]['pred_boxes'] = torch.tensor([[10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+                                                     [-10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+                                                     [0.0, 10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+                                                     [0.0, -10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57]])
+        lidar_boxes[0]['pred_scores'] = torch.tensor([0.5, 0.5, 0.5, 0.5])
+        lidar_boxes[0]['pred_labels'] = torch.tensor([1, 1, 1, 1], dtype=int)
+
+        detec_shape = lidar_boxes[0]['pred_boxes'].shape[0]
+        print(f'detection shape={detec_shape}')
+        #####
+
+        self.tracker(lidar_boxes, ego_pose,world_2_ego)
         self.plot_bbox_lidar(lidar_boxes,msg)
+
 
     def plot_bbox_lidar(self,lidar_boxes,msg):
 
@@ -133,6 +206,7 @@ class SecondROS:
                     lidar_boxes[batch_id]['pred_scores'] = lidar_boxes[batch_id]['pred_scores'][mask]   
 
         if lidar_boxes is not None:
+
             num_detects = lidar_boxes[0]['pred_boxes'].shape[0]
             arr_bbox = BoundingBoxArray()
 
@@ -160,7 +234,7 @@ class SecondROS:
                 bbox.pose.orientation.z = q.z
                 bbox.pose.orientation.w = q.w
 
-                if int(lidar_boxes[0]['pred_labels'][i]) == 0: # change for Car label
+                if int(lidar_boxes[0]['pred_labels'][i]) == 1: # change for Car label
                     arr_bbox.boxes.append(bbox)
                     bbox.label = i
                     bbox.value = i
@@ -169,11 +243,26 @@ class SecondROS:
             arr_bbox.header.stamp = rospy.Time.now()
             print(f"Scence num: {self.scenenum} Number of detections: {num_detects}")
 
-            self.scenenum += 1
             self.pub_bbox.publish(arr_bbox)
 
         else:
             boxes = None
+
+    def tracker(self,lidar_boxes,ego_pose,world_2_ego):
+
+        if lidar_boxes is not None:
+            boxes = lidar_boxes[0]['pred_boxes'].cpu().numpy()
+            boxes_coord = np.append(boxes[:, 0:3], np.ones((boxes.shape[0], 1)), axis=1)
+            scores = lidar_boxes[0]['pred_scores'].cpu().numpy()
+            boxes_world = np.dot(ego_pose, boxes_coord.T).T
+            boxes[:, 0:3] = boxes_world[:, 0:3]
+
+        else:
+            boxes = None
+            scores = None
+
+        tracker = self.Tracker.track_scene(boxes, scores, self.scenenum)
+        self.track_obj = save_seq(tracker,self.config, world_2_ego,self.velo2Cam,self.cam_P)
 
     def _fields_to_dtype(self, fields, point_step):
         '''Convert a list of PointFields to a numpy record datatype.
