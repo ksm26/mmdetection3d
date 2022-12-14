@@ -78,6 +78,7 @@ class SecondROS:
 
         self.config = cfg_from_yaml_file(yaml_file, cfg)
         self.Tracker = Track_seq(self.config)
+        self.tracker_obj_label = 0
 
         parser = ArgumentParser()
         parser.add_argument('--pcd', 
@@ -132,7 +133,7 @@ class SecondROS:
     def image_callback(self, image_data):
         # br = CvBridge()
         # img = br.imgmsg_to_cv2(image_data)
-        img = np.frombuffer(image_data.data, dtype=np.uint8).reshape(image_data.height, image_data.width, -1)
+        img = np.array(np.frombuffer(image_data.data, dtype=np.uint8).reshape(image_data.height, image_data.width, -1))
         zoe_viewer(img, self.track_obj, self.velo2Cam, self.cam_P)
     
     def lidar_callback(self, msg):
@@ -171,9 +172,9 @@ class SecondROS:
         lidar_boxes = []
 
         if 'nuscenes' in self.args.checkpoint:
-            lidar_boxes.append( {'pred_boxes':result[0]['pts_bbox']['boxes_3d'].tensor.numpy(),
-                            'pred_labels': result[0]['pts_bbox']['labels_3d'].numpy(),
-                            'pred_scores': result[0]['pts_bbox']['scores_3d'].numpy()
+            lidar_boxes.append( {'pred_boxes':result[0]['pts_bbox']['boxes_3d'].tensor,
+                            'pred_labels': result[0]['pts_bbox']['labels_3d'],
+                            'pred_scores': result[0]['pts_bbox']['scores_3d']
             })
         else:
             lidar_boxes.append( {'pred_boxes':result[0]['boxes_3d'].tensor.numpy(),
@@ -182,12 +183,12 @@ class SecondROS:
         })
 
         ####Test code
-        lidar_boxes[0]['pred_boxes'] = torch.tensor([[10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
-                                                     [-10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
-                                                     [0.0, 10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
-                                                     [0.0, -10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57]])
-        lidar_boxes[0]['pred_scores'] = torch.tensor([0.5, 0.5, 0.5, 0.5])
-        lidar_boxes[0]['pred_labels'] = torch.tensor([1, 1, 1, 1], dtype=int)
+        # lidar_boxes[0]['pred_boxes'] = torch.tensor([[10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+        #                                              [-10.0, 0.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+        #                                              [0.0, 10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57],
+        #                                              [0.0, -10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57]])
+        # lidar_boxes[0]['pred_scores'] = torch.tensor([0.5, 0.5, 0.5, 0.5])
+        # lidar_boxes[0]['pred_labels'] = torch.tensor([0, 0, 0, 0], dtype=int)
 
         detec_shape = lidar_boxes[0]['pred_boxes'].shape[0]
         print(f'detection shape={detec_shape}')
@@ -199,11 +200,16 @@ class SecondROS:
 
     def plot_bbox_lidar(self,lidar_boxes,msg):
 
-        for batch_id in range(len(lidar_boxes)):
-            if self.args.score_thr is not None:
-                    mask = lidar_boxes[batch_id]['pred_scores'] > self.args.score_thr
-                    lidar_boxes[batch_id]['pred_boxes'] = lidar_boxes[batch_id]['pred_boxes'][mask]
-                    lidar_boxes[batch_id]['pred_scores'] = lidar_boxes[batch_id]['pred_scores'][mask]   
+        if self.args.score_thr is not None:
+            mask = lidar_boxes[0]['pred_scores'] > self.args.score_thr
+            lidar_boxes[0]['pred_boxes'] = lidar_boxes[0]['pred_boxes'][mask]
+            lidar_boxes[0]['pred_scores'] = lidar_boxes[0]['pred_scores'][mask]
+            lidar_boxes[0]['pred_labels'] = lidar_boxes[0]['pred_labels'][mask]
+
+            mask_obj = (lidar_boxes[0]['pred_labels'] == self.tracker_obj_label)
+            lidar_boxes[0]['pred_boxes'] = lidar_boxes[0]['pred_boxes'][mask_obj]
+            lidar_boxes[0]['pred_scores'] = lidar_boxes[0]['pred_scores'][mask_obj]
+            lidar_boxes[0]['pred_labels'] = lidar_boxes[0]['pred_labels'][mask_obj]
 
         if lidar_boxes is not None:
 
@@ -215,7 +221,7 @@ class SecondROS:
 
                 bbox.header.frame_id = msg.header.frame_id
                 bbox.header.stamp = rospy.Time.now()
-                
+
                 bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][0])
                 bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][1])
                 bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2])
@@ -223,7 +229,7 @@ class SecondROS:
                 bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
                 bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
                 bbox.dimensions.z = float(lidar_boxes[0]['pred_boxes'][i][5])  # height
-                
+
                 if 'nuscenes' in self.args.checkpoint:
                     q = Quaternion(axis=(0, 0, 1), radians=float(lidar_boxes[0]['pred_boxes'][i][6])+np.pi/2)
                 else:
@@ -234,11 +240,11 @@ class SecondROS:
                 bbox.pose.orientation.z = q.z
                 bbox.pose.orientation.w = q.w
 
-                if int(lidar_boxes[0]['pred_labels'][i]) == 1: # change for Car label
+                if int(lidar_boxes[0]['pred_labels'][i]) == self.tracker_obj_label : # change for Car label
                     arr_bbox.boxes.append(bbox)
                     bbox.label = i
                     bbox.value = i
-        
+
             arr_bbox.header.frame_id = msg.header.frame_id
             arr_bbox.header.stamp = rospy.Time.now()
             print(f"Scence num: {self.scenenum} Number of detections: {num_detects}")
@@ -251,9 +257,10 @@ class SecondROS:
     def tracker(self,lidar_boxes,ego_pose,world_2_ego):
 
         if lidar_boxes is not None:
-            boxes = lidar_boxes[0]['pred_boxes'].cpu().numpy()
+            mask = lidar_boxes[0]['pred_labels'] == self.tracker_obj_label
+            boxes = lidar_boxes[0]['pred_boxes'][mask].cpu().numpy()
             boxes_coord = np.append(boxes[:, 0:3], np.ones((boxes.shape[0], 1)), axis=1)
-            scores = lidar_boxes[0]['pred_scores'].cpu().numpy()
+            scores = lidar_boxes[0]['pred_scores'][mask].cpu().numpy()
             boxes_world = np.dot(ego_pose, boxes_coord.T).T
             boxes[:, 0:3] = boxes_world[:, 0:3]
 
