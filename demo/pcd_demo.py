@@ -11,6 +11,8 @@ sys.path.append("/opt/ros/melodic/lib/python2.7/dist-packages")
 import rospy
 from pyquaternion import Quaternion
 from jsk_recognition_msgs.msg import BoundingBox, BoundingBoxArray
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 from numpy.lib.recfunctions import structured_to_unstructured
 from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
 import math
@@ -23,9 +25,6 @@ sys.path.append("~/Desktop/mmdetection3d")
 sys.path.append("/home/khushdeep/Desktop/3D-Multi-Object-Tracker")
 from tracker.config import cfg, cfg_from_yaml_file
 from zoe_3DMOT import Track_seq,save_seq
-
-sys.path.append("/home/khushdeep/Desktop/3D-Detection-Tracking-Viewer")
-from zoe_3D_tracking_viewer import zoe_viewer
 
 sys.path.append("/home/khushdeep/Desktop/3D-Detection-Tracking-Viewer")
 from zoe_3D_tracking_viewer import zoe_viewer
@@ -59,14 +58,14 @@ class SecondROS:
         # Tracking
         self.camera_info_msg = rospy.wait_for_message("/zoe/camera_front/camera_out/camera_info", CameraInfo)
         self.cam_P = np.array(self.camera_info_msg.P).reshape((3, 4))
-        print(self.cam_P)
+        # print(self.cam_P)
         now = rospy.Time.now()
         self.tf_listener.waitForTransform('zoe/camera_front', 'zoe/velodyne', rospy.Time(0), rospy.Duration(5.0))
         (trans_camera, rot_camera) = self.tf_listener.lookupTransform('zoe/camera_front', 'zoe/velodyne',rospy.Time(0))
-        print(f'translation_camera = {trans_camera}')
+        # print(f'translation_camera = {trans_camera}')
         self.velo2Cam = np.asarray(self.tf_listener.fromTranslationRotation(trans_camera, rot_camera))
-        print(f'velo2cam = {self.velo2Cam}')
-        print(f'Camera translation={trans_camera}')
+        # print(f'velo2cam = {self.velo2Cam}')
+        # print(f'Camera translation={trans_camera}')
 
         parser = argparse.ArgumentParser(description='arg parser')
         parser.add_argument('--cfg_file', type=str,
@@ -101,7 +100,7 @@ class SecondROS:
         parser.add_argument(
             '--device', default='cuda:0', help='Device used for inference')
         parser.add_argument(
-            '--score-thr', type=float, default=0.3, help='bbox score threshold')
+            '--score-thr', type=float, default=0.45, help='bbox score threshold')
             # 0.15 - 3dssd (as expected), 0.25 - pointpillar, 0.2 - pointrcnn
         parser.add_argument(
             '--out-dir', type=str, default='demo', help='dir to save results')
@@ -121,12 +120,12 @@ class SecondROS:
 
         # Subscriber
         self.sub_lidar = rospy.Subscriber("/zoe/velodyne_points", PointCloud2, self.lidar_callback, queue_size=1)
-        self.sub_image = rospy.Subscriber("/zoe/camera_front/image_color", Image, self.image_callback)
+        # self.sub_image = rospy.Subscriber("/zoe/camera_front/image_color", Image, self.image_callback)
+        # self.sub_image = rospy.Subscriber("/zoe/camera_front/image_subtitles", Image, self.image_callback)
 
         # Publisher
         self.pub_bbox = rospy.Publisher("/detections", BoundingBoxArray, queue_size=1)
-
-
+        self.markerIDs = rospy.Publisher("/markerID", MarkerArray, queue_size=1)
 
         rospy.spin()
     
@@ -134,8 +133,9 @@ class SecondROS:
         # br = CvBridge()
         # img = br.imgmsg_to_cv2(image_data)
         img = np.array(np.frombuffer(image_data.data, dtype=np.uint8).reshape(image_data.height, image_data.width, -1))
-        zoe_viewer(img, self.track_obj, self.velo2Cam, self.cam_P)
+        # zoe_viewer(img, self.track_obj, self.velo2Cam, self.cam_P)
     
+
     def lidar_callback(self, msg):
 
         self.tf_listener.waitForTransform('zoe/world', 'zoe/velodyne', rospy.Time(), rospy.Duration(4.0))
@@ -189,15 +189,48 @@ class SecondROS:
         #                                              [0.0, -10.0, -1.0, 3.7428, 1.6276, 1.5223, 1.57]])
         # lidar_boxes[0]['pred_scores'] = torch.tensor([0.5, 0.5, 0.5, 0.5])
         # lidar_boxes[0]['pred_labels'] = torch.tensor([0, 0, 0, 0], dtype=int)
+        # #####
+        self.tracker(lidar_boxes, ego_pose,world_2_ego, msg)
 
-        detec_shape = lidar_boxes[0]['pred_boxes'].shape[0]
-        print(f'detection shape={detec_shape}')
-        #####
+        # self.plot_bbox_lidar(lidar_boxes,msg)
 
-        self.tracker(lidar_boxes, ego_pose,world_2_ego)
-        self.plot_bbox_lidar(lidar_boxes,msg)
+    def make_label(self, msg, bbox, q, i):
+        """ Helper function for generating visualization markers.
+            Args:
+                msg : PointCloud object
+                bbox : BoundingBox object
+                q : Quaternion angles
+            Returns:
+                Marker: A text view marker which can be published to RViz
+        """
+        marker = Marker()
 
+        marker.header.frame_id= msg.header.frame_id
+        marker.header.stamp = rospy.Time.now()
 
+        marker.ns = f"VehicleMarker"
+        # print(self.track_obj)
+        marker.id = self.ids[i]
+        marker.type= marker.TEXT_VIEW_FACING
+        marker.action = marker.ADD
+
+        marker.scale.x = 1
+        marker.scale.y = 1
+        marker.scale.z = 2
+        marker.pose.position.x = bbox.pose.position.x
+        marker.pose.position.y = bbox.pose.position.y
+        marker.pose.position.z = bbox.pose.position.z
+        marker.pose.orientation.x = q.x
+        marker.pose.orientation.y = q.y
+        marker.pose.orientation.z = q.z
+        marker.pose.orientation.w = q.w
+        
+        marker.color= ColorRGBA(1, 0, 0, 1)
+        marker.text='ID: %d'% marker.id
+        marker.lifetime = rospy.Duration(0.6)
+
+        return marker
+        
     def plot_bbox_lidar(self,lidar_boxes,msg):
 
         if self.args.score_thr is not None:
@@ -215,17 +248,17 @@ class SecondROS:
 
             num_detects = lidar_boxes[0]['pred_boxes'].shape[0]
             arr_bbox = BoundingBoxArray()
+            arrIDs = MarkerArray()
 
             for i in range(num_detects):
                 bbox = BoundingBox()
-
+                
                 bbox.header.frame_id = msg.header.frame_id
                 bbox.header.stamp = rospy.Time.now()
 
                 bbox.pose.position.x = float(lidar_boxes[0]['pred_boxes'][i][0])
                 bbox.pose.position.y = float(lidar_boxes[0]['pred_boxes'][i][1])
                 bbox.pose.position.z = float(lidar_boxes[0]['pred_boxes'][i][2])
-
                 bbox.dimensions.x = float(lidar_boxes[0]['pred_boxes'][i][3])  # width
                 bbox.dimensions.y = float(lidar_boxes[0]['pred_boxes'][i][4])  # length
                 bbox.dimensions.z = float(lidar_boxes[0]['pred_boxes'][i][5])  # height
@@ -240,8 +273,11 @@ class SecondROS:
                 bbox.pose.orientation.z = q.z
                 bbox.pose.orientation.w = q.w
 
+                marker = self.make_label(msg, bbox, q, i)
+
                 if int(lidar_boxes[0]['pred_labels'][i]) == self.tracker_obj_label : # change for Car label
                     arr_bbox.boxes.append(bbox)
+                    arrIDs.markers.append(marker)
                     bbox.label = i
                     bbox.value = i
 
@@ -250,16 +286,17 @@ class SecondROS:
             print(f"Scence num: {self.scenenum} Number of detections: {num_detects}")
 
             self.pub_bbox.publish(arr_bbox)
+            self.markerIDs.publish(arrIDs)
 
         else:
             boxes = None
 
-    def tracker(self,lidar_boxes,ego_pose,world_2_ego):
+    def tracker(self,lidar_boxes,ego_pose,world_2_ego, msg):
 
-        if lidar_boxes is not None:
+        if lidar_boxes is not None: # lidar boxes are modified here 
             mask = lidar_boxes[0]['pred_labels'] == self.tracker_obj_label
             boxes = lidar_boxes[0]['pred_boxes'][mask].cpu().numpy()
-            boxes_coord = np.append(boxes[:, 0:3], np.ones((boxes.shape[0], 1)), axis=1)
+            boxes_coord = np.append(boxes[:, 0:3], np.ones((boxes.shape[0], 1)), axis=1) # only x,y,z changes and not angle 
             scores = lidar_boxes[0]['pred_scores'][mask].cpu().numpy()
             boxes_world = np.dot(ego_pose, boxes_coord.T).T
             boxes[:, 0:3] = boxes_world[:, 0:3]
@@ -268,8 +305,10 @@ class SecondROS:
             boxes = None
             scores = None
 
-        tracker = self.Tracker.track_scene(boxes, scores, self.scenenum)
-        self.track_obj = save_seq(tracker,self.config, world_2_ego,self.velo2Cam,self.cam_P)
+        trackeringObj, self.ids = self.Tracker.track_scene(boxes, scores, self.scenenum) #tracker.current_bbs
+        self.track_obj = save_seq(trackeringObj,self.config, world_2_ego,self.velo2Cam,self.cam_P)
+
+        self.plot_bbox_lidar(lidar_boxes,msg)
 
     def _fields_to_dtype(self, fields, point_step):
         '''Convert a list of PointFields to a numpy record datatype.
